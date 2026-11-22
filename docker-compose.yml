@@ -1,0 +1,31 @@
+# Local run:  docker compose up --build
+# API on http://localhost:8080
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: eventbooking
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      retries: 20
+
+  api:
+    build: .
+    depends_on:
+      db: { condition: service_healthy }
+    ports: ["8080:8080"]
+    environment:
+      DB_HOST: db
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      JWT_SECRET: local-dev-secret-at-least-32-characters-long
+      BOOKING_MODE: ${BOOKING_MODE:-optimized}
+      VIRTUAL_THREADS: ${VIRTUAL_THREADS:-true}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-brevo-api}
+      BREVO_API_KEY: ${BREVO_API_KEY:-}
+      EMAIL_FROM: ${EMAIL_FROM:-no-reply@example.com}

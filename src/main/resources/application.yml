@@ -1,0 +1,76 @@
+server:
+  port: ${PORT:8080}
+  tomcat:
+    threads:
+      max: ${TOMCAT_MAX_THREADS:200}
+    accept-count: ${TOMCAT_ACCEPT_COUNT:100}
+    connection-timeout: 10s
+
+spring:
+  application:
+    name: event-booking-api
+  threads:
+    virtual:
+      # Java 21 virtual threads: one cheap virtual thread per request instead of
+      # a fixed pool of 200 platform threads. Part of the "optimized" profile.
+      enabled: ${VIRTUAL_THREADS:false}
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:eventbooking}${DB_PARAMS:}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:postgres}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+      minimum-idle: 2
+      # Fail fast when the pool is exhausted -> API answers 503 instead of hanging.
+      connection-timeout: ${DB_CONNECTION_TIMEOUT_MS:5000}
+  flyway:
+    enabled: true
+  mail:
+    host: ${SMTP_HOST:smtp-relay.brevo.com}
+    port: ${SMTP_PORT:587}
+    username: ${SMTP_USER:}
+    password: ${SMTP_PASS:}
+    properties:
+      mail.smtp.auth: true
+      mail.smtp.starttls.enable: true
+      mail.smtp.connectiontimeout: 10000
+      mail.smtp.timeout: 10000
+      mail.smtp.writetimeout: 10000
+
+management:
+  health:
+    mail:
+      enabled: false
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+
+app:
+  jwt:
+    # Must be at least 32 characters (HS256).
+    secret: ${JWT_SECRET:dev-only-secret-change-me-please-0123456789}
+    ttl-minutes: ${JWT_TTL_MINUTES:1440}
+  booking:
+    # baseline  = first-cut implementation (SELECT ... FOR UPDATE + several round trips,
+    #             user re-loaded from DB on every request). Used to show the breaking point.
+    # optimized = single atomic conditional UPDATE, stateless JWT auth.
+    mode: ${BOOKING_MODE:optimized}
+    max-tickets-per-booking: 10
+  jobs:
+    poll-interval-ms: ${JOBS_POLL_INTERVAL_MS:500}
+    batch-size: ${JOBS_BATCH_SIZE:50}
+    worker-threads: ${JOBS_WORKER_THREADS:8}
+    enabled: ${JOBS_ENABLED:true}
+  email:
+    # brevo-api (HTTPS, works on hosts that block SMTP ports) | smtp
+    provider: ${EMAIL_PROVIDER:brevo-api}
+    from: ${EMAIL_FROM:no-reply@example.com}
+    from-name: ${EMAIL_FROM_NAME:Event Booking}
+    brevo-api-key: ${BREVO_API_KEY:}
+    # Recipients at these domains are logged as SUPPRESSED instead of being sent,
+    # so load tests don't burn the provider's daily quota.
+    suppress-domains: ${EMAIL_SUPPRESS_DOMAINS:loadtest.local}

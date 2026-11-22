@@ -1,0 +1,40 @@
+# Render Blueprint: New > Blueprint > pick this repo. Creates the Postgres DB + the web service.
+databases:
+  - name: event-booking-db
+    plan: free
+    databaseName: eventbooking
+    user: eventbooking
+
+services:
+  - type: web
+    name: event-booking-api
+    runtime: docker
+    plan: free
+    healthCheckPath: /actuator/health
+    envVars:
+      - key: DB_HOST
+        fromDatabase: { name: event-booking-db, property: host }
+      - key: DB_PORT
+        fromDatabase: { name: event-booking-db, property: port }
+      - key: DB_NAME
+        fromDatabase: { name: event-booking-db, property: database }
+      - key: DB_USER
+        fromDatabase: { name: event-booking-db, property: user }
+      - key: DB_PASSWORD
+        fromDatabase: { name: event-booking-db, property: password }
+      - key: JWT_SECRET
+        generateValue: true
+      - key: BOOKING_MODE
+        value: optimized
+      - key: VIRTUAL_THREADS
+        value: "true"
+      - key: DB_POOL_SIZE
+        value: "10"
+      - key: EMAIL_PROVIDER
+        value: brevo-api
+      - key: BREVO_API_KEY
+        sync: false   # set in the dashboard
+      - key: EMAIL_FROM
+        sync: false   # must be a sender verified in Brevo
+      - key: EMAIL_FROM_NAME
+        value: Event Booking

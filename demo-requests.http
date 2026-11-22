@@ -1,0 +1,77 @@
+### Event Booking API - demo requests (IntelliJ HTTP Client)
+### Run requests IN ORDER (1 -> 12). Tokens and the event id are saved automatically
+### by the "> {% ... %}" scripts and reused by later requests.
+### Re-running from the top? Change the two emails in 1 and 2 (or you'll get 409).
+
+@base = http://localhost:8080
+
+### 1. Register an organizer
+POST {{base}}/api/auth/register
+Content-Type: application/json
+
+{ "name": "Olivia Organizer", "email": "olivia1@example.com", "password": "secret123", "role": "ORGANIZER" }
+
+> {% client.global.set("orgToken", response.body.token); %}
+
+### 2. Register a customer (use a REAL inbox you can show in the video)
+POST {{base}}/api/auth/register
+Content-Type: application/json
+
+{ "name": "Your Name", "email": "rochasvarma123+t1@gmail.com", "password": "secret123", "role": "CUSTOMER" }
+
+> {% client.global.set("custToken", response.body.token); %}
+
+### 3. Organizer creates an event
+POST {{base}}/api/events
+Authorization: Bearer {{orgToken}}
+Content-Type: application/json
+
+{ "title": "Tech Meetup 2026", "description": "Talks + pizza", "venue": "Bengaluru Hall A",
+  "startsAt": "2026-12-20T18:00:00+05:30", "totalTickets": 100 }
+
+> {% client.global.set("eventId", response.body.id); %}
+
+### 4. RBAC check: customer tries to create an event -> 403
+POST {{base}}/api/events
+Authorization: Bearer {{custToken}}
+Content-Type: application/json
+
+{ "title": "Nope", "venue": "x", "startsAt": "2026-12-20T18:00:00+05:30", "totalTickets": 5 }
+
+### 5. Anyone can browse events (no token)
+GET {{base}}/api/events?q=tech
+
+### 6. Customer books 2 tickets -> Background Task 1 sends the confirmation email
+POST {{base}}/api/events/{{eventId}}/bookings
+Authorization: Bearer {{custToken}}
+Content-Type: application/json
+
+{ "quantity": 2 }
+
+> {% client.global.set("bookingId", response.body.id); %}
+
+### 7. Customer's bookings
+GET {{base}}/api/bookings/me
+Authorization: Bearer {{custToken}}
+
+### 8. Organizer updates the event -> Background Task 2 emails every ticket holder
+PATCH {{base}}/api/events/{{eventId}}
+Authorization: Bearer {{orgToken}}
+Content-Type: application/json
+
+{ "venue": "Bengaluru Hall  B (bigger room!)", "startsAt": "2026-12-20T19:00:00+05:30" }
+
+### 9. Customer's in-app notifications (wait ~2s after 8)
+GET {{base}}/api/notifications/me
+Authorization: Bearer {{custToken}}
+
+### 10. Organizer sees bookings for the event
+GET {{base}}/api/organizer/events/{{eventId}}/bookings
+Authorization: Bearer {{orgToken}}
+
+### 11. Job queue + email log stats (proof emails were sent)
+GET {{base}}/api/organizer/ops/stats
+Authorization: Bearer {{orgToken}}
+
+### 12. Which performance profile is running?
+GET {{base}}/
