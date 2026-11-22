@@ -6,6 +6,9 @@ param(
   [string]$Duration = "20s"
 )
 New-Item -ItemType Directory -Force -Path loadtest/results | Out-Null
+# Warm-up run (discarded): lets the JVM JIT-compile the hot path so step 1 isn't penalised.
+Write-Host "Warming up the server (results discarded)..." -ForegroundColor DarkGray
+k6 run -q -e BASE_URL=$BaseUrl -e VUS=10 -e DURATION=15s -e CUSTOMERS=10 loadtest/booking.js | Out-Null
 foreach ($v in $Steps) {
   Write-Host "`n===== $v concurrent users =====" -ForegroundColor Cyan
   k6 run -q -e BASE_URL=$BaseUrl -e VUS=$v -e DURATION=$Duration loadtest/booking.js | Select-String "RESULT"

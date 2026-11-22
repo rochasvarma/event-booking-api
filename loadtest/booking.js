@@ -11,7 +11,7 @@
 //   UPDATE_RPS   event updates per second by the organizer during the test (default 0 = off)
 //   TIMEOUT      per-request timeout before counting it as dropped (default 10s)
 import http from 'k6/http';
-import { check } from 'k6';
+import { check, sleep } from 'k6';
 import { Counter, Rate, Trend } from 'k6/metrics';
 import { textSummary } from 'https://jslib.k6.io/k6-summary/0.0.2/index.js';
 
@@ -21,6 +21,10 @@ const DURATION = __ENV.DURATION || '30s';
 const CUSTOMERS = Number(__ENV.CUSTOMERS || 50);
 const UPDATE_RPS = Number(__ENV.UPDATE_RPS || 0);
 const TIMEOUT = __ENV.TIMEOUT || '10s';
+const THINK = Number(__ENV.THINK || 0);   // seconds a user pauses between bookings (0 = hammer)
+// Length of the load phase in seconds (excludes setup, which registers users).
+const LOAD_SECS = (() => { const m = String(DURATION).match(/^(\d+)(ms|s|m)?$/); if (!m) return 30;
+  const n = Number(m[1]); return m[2] === 'm' ? n * 60 : m[2] === 'ms' ? n / 1000 : n; })();
 const JSON_HDR = { 'Content-Type': 'application/json' };
 
 const booked = new Counter('bookings_ok');          // 201
@@ -90,6 +94,7 @@ export function book(data) {
   else if (res.status === 503) shed.add(1);
   else dropped.add(1);
   check(res, { 'booked (201)': (r) => r.status === 201 });
+  if (THINK > 0) sleep(THINK);
 }
 
 export function update(data) {
@@ -103,7 +108,7 @@ export function handleSummary(data) {
   const m = data.metrics;
   const v = (k, f) => (m[k] && m[k].values[f] !== undefined ? m[k].values[f] : 0);
   const total = v('bookings_ok', 'count') + v('bookings_conflict', 'count') + v('bookings_503', 'count') + v('bookings_dropped', 'count');
-  const secs = data.state.testRunDurationMs / 1000;
+  const secs = LOAD_SECS; // throughput over the load phase only (setup excluded)
   const line = [
     `VUS=${VUS}`,
     `requests=${total}`,

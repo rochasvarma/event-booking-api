@@ -1,30 +1,32 @@
 package com.eventbooking.jobs;
 
+import com.eventbooking.email.EmailService;
 import com.eventbooking.email.EmailTemplates;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.OffsetDateTime;
 import java.util.Map;
 
 /**
  * Background Task 1: Booking confirmation.
- * Creates an in-app notification and enqueues a SEND_EMAIL job (one transaction), so the actual
- * email delivery gets its own independent retries.
+ * One job does everything: load the booking, send the email, record the in-app notification.
+ * (An earlier version enqueued a second SEND_EMAIL job here. Merging them halves the background
+ * DB work per booking, which matters when the worker shares a tiny CPU with the API.)
+ *
+ * Order matters for retries: the email is sent first and the notification is inserted only after
+ * the send succeeded, so a failed send retries cleanly without duplicate notifications.
  */
 @Component
 public class BookingConfirmedHandler implements JobHandler {
 
     private final JdbcClient jdbc;
-    private final JobQueue queue;
-    private final TransactionTemplate tx;
+    private final EmailService email;
 
-    public BookingConfirmedHandler(JdbcClient jdbc, JobQueue queue, TransactionTemplate tx) {
+    public BookingConfirmedHandler(JdbcClient jdbc, EmailService email) {
         this.jdbc = jdbc;
-        this.queue = queue;
-        this.tx = tx;
+        this.email = email;
     }
 
     @Override
@@ -33,7 +35,7 @@ public class BookingConfirmedHandler implements JobHandler {
     }
 
     @Override
-    public void handle(JsonNode payload) {
+    public void handle(JsonNode payload) throws Exception {
         long bookingId = payload.get("bookingId").asLong();
         var row = jdbc.sql("""
                         SELECT b.id, b.quantity, b.event_id, u.id AS user_id, u.name, u.email,
@@ -57,17 +59,17 @@ public class BookingConfirmedHandler implements JobHandler {
                 .orElseThrow(() -> new IllegalStateException("Booking " + bookingId + " not found"));
 
         String subject = "Booking confirmed: " + row.get("title");
-        String html = EmailTemplates.bookingConfirmation(row);
-        String message = "Your booking #" + bookingId + " for " + row.get("quantity") + " ticket(s) to \""
-                + row.get("title") + "\" is confirmed.";
 
-        tx.executeWithoutResult(s -> {
-            jdbc.sql("""
-                            INSERT INTO notifications (user_id, event_id, type, title, message)
-                            VALUES (:u, :e, 'BOOKING_CONFIRMED', :t, :m)""")
-                    .param("u", row.get("userId")).param("e", row.get("eventId"))
-                    .param("t", subject).param("m", message).update();
-            queue.enqueue(JobQueue.SEND_EMAIL, Map.of("to", row.get("email"), "subject", subject, "html", html));
-        });
+        // 1. Send the real email (throws on failure -> job retried with backoff).
+        email.send((String) row.get("email"), subject, EmailTemplates.bookingConfirmation(row));
+
+        // 2. Record the in-app notification.
+        jdbc.sql("""
+                        INSERT INTO notifications (user_id, event_id, type, title, message)
+                        VALUES (:u, :e, 'BOOKING_CONFIRMED', :t, :m)""")
+                .param("u", row.get("userId")).param("e", row.get("eventId")).param("t", subject)
+                .param("m", "Your booking #" + bookingId + " for " + row.get("quantity") + " ticket(s) to \""
+                        + row.get("title") + "\" is confirmed.")
+                .update();
     }
 }

@@ -188,21 +188,39 @@ This is the typical first-cut code:
 | 2 | **Stateless JWT auth**, no user lookup per request | One fewer query and pool checkout per request. |
 | 3 | **Transactional outbox + async workers**: email is never in the request path | Booking latency is independent of the email provider's latency. |
 | 4 | **Java 21 virtual threads** | Thousands of concurrent requests without a 200-thread ceiling or per-thread memory. |
-| 5 | **Small, fixed Hikari pool + fast-fail (5 s) → 503 + `Retry-After`** | Postgres performs best with few connections (≈ 2×cores). Fail-fast sheds load cleanly instead of timing out. |
+| 5 | **Small, fixed Hikari pool + fast-fail → 503 + `Retry-After`** | Postgres performs best with few connections (≈ 2×cores). Fail-fast sheds load cleanly instead of timing out. |
 | 6 | **Background worker capped at 2 threads** (`JOBS_WORKER_THREADS`) | Worker threads share the 10-connection pool. At 8 threads they took connections bookings needed under load (which showed up as 503s). |
-| 7 | **Indexes / partial indexes** on hot lookups; set-based SQL fan-out for notifications | Constant-time paths. One statement notifies N customers. |
+| 7 | **One background job per booking** (confirmation handler sends the email directly) | Halves background DB work per booking, leaving more CPU and connections for the API. |
+| 8 | **Pool wait 8 s, just under the client timeout** | Short bursts queue instead of being rejected. Real overload still gets a fast 503. |
+| 9 | **Indexes / partial indexes** on hot lookups; set-based SQL fan-out for notifications | Constant-time paths. One statement notifies N customers. |
 
-### Results  ← fill in from your runs
+### Results (Render free tier: 0.1 CPU / 512 MB web service + free Postgres, k6 from Bengaluru, 20 s per step)
 
-| Concurrent users | Baseline ok/s | Baseline p95 | Baseline error % | Optimized ok/s | Optimized p95 | Optimized error % |
-|---|---|---|---|---|---|---|
-| 50  | | | | | | |
-| 100 | | | | | | |
-| 200 | | | | | | |
-| 400 | | | | | | |
-| 800 | | | | | | |
+Successful bookings per second (201s ÷ 20 s load phase), p95 latency, and error rate (503s + timeouts):
 
-**Breaking point:** baseline ≈ ___ users → optimized ≈ ___ users (environment: Render free, 0.1 CPU / 512 MB, Postgres free).
+| Concurrent users | Baseline | Optimized v1 | Optimized v2 |
+|---|---|---|---|
+| 25  | 8.8/s · p95 5.6 s · 1.1% | 12.5/s · p95 3.9 s · 0% | 10.9/s · p95 4.8 s · 0.5% |
+| 50  | 14.5/s · p95 6.6 s · 0.3% | 16.9/s · p95 4.9 s · 1.7% | **21.0/s · p95 4.6 s · 0.5%** |
+| 100 | 21.5/s · p95 7.8 s · **7.1%** | 26.4/s · p95 5.8 s · 7.4% | **34.0/s · p95 5.5 s · 1.2%** |
+| 200 | 19.4/s · p95 10 s · **41%** | 25.1/s · p95 7.6 s · 37% | **37.4/s · p95 6.4 s · 9.6%** |
+| 400 | 10.1/s · p95 10 s · 83% (943 timeouts) | 9.2/s · p95 9.4 s · 85% (mostly fast 503s) | 13.6/s · p95 10 s · 74% |
+
+- **v1** = single conditional UPDATE + stateless JWT + virtual threads + fast-fail 503.
+- **v2** = v1 + reservation, booking and outbox job folded into **one auto-committed statement** + background worker capped at 2 threads.
+- **v3** (latest code) = v2 + one background job per booking instead of two (the confirmation handler sends the email itself) + DB pool wait raised from 5 s to 8 s, just under the client's 10 s timeout. Before each test, a warm-up run is discarded so the JVM has JIT-compiled the hot path.
+
+> An earlier version of the k6 script divided by the whole run time, including ~40 s of user-registration setup, which under-reported throughput about 3×. The table above uses the corrected load-phase figure. Error rates and latencies were unaffected.
+
+**Breaking point**
+- **Baseline:** degrades past **~50 concurrent users**. At 100 users, 7% of requests fail; at 200 users, 41%. Peak throughput is ~21 bookings/s.
+- **Optimized v2:** holds to **~100 concurrent users** with about 1% errors, and at 200 users fails only 9.6%. Peak throughput is **~37 bookings/s**.
+
+**Delta:** about **2× the concurrency** before degradation, **+74% peak throughput** (21.5 → 37.4/s), **4× fewer errors at 200 users** (41% → 9.6%), and **~30% lower p95** up to 200 users. Overload also changed from requests hanging until timeout to fast `503 + Retry-After` responses.
+
+**Reading the numbers (Little's law):** k6 users book back-to-back with zero think time, so latency ≈ users ÷ throughput. At 200 users and ~37 bookings/s, each request inevitably waits ~5.4 s. Errors appear wherever that wait crosses a timeout. The only ways to push the breaking point further are more throughput or more patient timeouts. Real users pause between actions; `-e THINK=1` models that.
+
+**Why the ceiling is still low:** at 0.1 vCPU, the web container itself is the bottleneck past ~200 users. At 400 users, Render's edge proxy starts resetting connections. The remaining scaling levers are infrastructure: more CPU, more instances, and PgBouncer (see below).
 
 ### Further optimizations (next steps at larger scale)
 - **Horizontal scaling:** the app is stateless (JWT + DB queue), so add instances behind the load balancer. Add **PgBouncer** (transaction pooling) so many instances share few Postgres connections.
