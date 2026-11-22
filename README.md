@@ -175,21 +175,22 @@ Each run prints a line like:
 
 **Breaking point definition:** the concurrency level where the error rate (timeouts, connection errors, 5xx) rises above ~1%, or p95 latency goes past ~2 s. Past this point, adding users adds failures, not throughput.
 
-### Baseline: the initial implementation (`BOOKING_MODE=baseline`, `VIRTUAL_THREADS=false`)
+### Baseline: the initial implementation (`BOOKING_MODE=baseline`, `VIRTUAL_THREADS=false`, `JOBS_WORKER_THREADS=8`)
 This is the typical first-cut code:
-1. `SELECT … FOR UPDATE` the event row, check availability in Java, `UPDATE` the counter, `INSERT` the booking. That is **4 round trips with the row lock held across them**, so every booking for a popular event waits behind the previous one.
+1. `BEGIN`, `SELECT … FOR UPDATE` the event row, check availability in Java, `UPDATE` the counter, `INSERT` the booking, `INSERT` the job, `COMMIT`. That is **6 round trips with the row lock held across them**, so every booking for a popular event waits behind the previous one.
 2. The auth filter **reloads the user from the DB on every request**: an extra query and a pool checkout.
 3. 200 platform Tomcat threads compete for 10 DB connections; when the pool is empty, requests block until timeout.
 
-### Optimized (`BOOKING_MODE=optimized`, `VIRTUAL_THREADS=true`)
+### Optimized (`BOOKING_MODE=optimized`, `VIRTUAL_THREADS=true`, `JOBS_WORKER_THREADS=2`)
 | # | Optimization | Effect |
 |---|---|---|
-| 1 | **Single atomic conditional UPDATE + INSERT (CTE)** instead of lock → read → write | Row lock held for microseconds instead of several network round trips. Biggest win on a hot event. |
+| 1 | **One auto-committed SQL statement** (CTE: conditional `UPDATE` + booking `INSERT` + outbox job `INSERT`) instead of BEGIN → lock → read → write → COMMIT | 1 round trip instead of 6, no separate COMMIT, and the row lock lasts only for the statement. Biggest win on a hot event. Still atomic, so the outbox guarantee holds. |
 | 2 | **Stateless JWT auth**, no user lookup per request | One fewer query and pool checkout per request. |
 | 3 | **Transactional outbox + async workers**: email is never in the request path | Booking latency is independent of the email provider's latency. |
 | 4 | **Java 21 virtual threads** | Thousands of concurrent requests without a 200-thread ceiling or per-thread memory. |
 | 5 | **Small, fixed Hikari pool + fast-fail (5 s) → 503 + `Retry-After`** | Postgres performs best with few connections (≈ 2×cores). Fail-fast sheds load cleanly instead of timing out. |
-| 6 | **Indexes / partial indexes** on hot lookups; set-based SQL fan-out for notifications | Constant-time paths. One statement notifies N customers. |
+| 6 | **Background worker capped at 2 threads** (`JOBS_WORKER_THREADS`) | Worker threads share the 10-connection pool. At 8 threads they took connections bookings needed under load (which showed up as 503s). |
+| 7 | **Indexes / partial indexes** on hot lookups; set-based SQL fan-out for notifications | Constant-time paths. One statement notifies N customers. |
 
 ### Results  ← fill in from your runs
 

@@ -3,13 +3,14 @@
 ### by the "> {% ... %}" scripts and reused by later requests.
 ### Re-running from the top? Change the two emails in 1 and 2 (or you'll get 409).
 
+#@base = https://event-booking-api-be40.onrender.com
 @base = http://localhost:8080
 
 ### 1. Register an organizer
 POST {{base}}/api/auth/register
 Content-Type: application/json
 
-{ "name": "Olivia Organizer", "email": "olivia1@example.com", "password": "secret123", "role": "ORGANIZER" }
+{ "name": "Olivia Organizer", "email": "olivia3@example.com", "password": "secret123", "role": "ORGANIZER" }
 
 > {% client.global.set("orgToken", response.body.token); %}
 
@@ -17,7 +18,7 @@ Content-Type: application/json
 POST {{base}}/api/auth/register
 Content-Type: application/json
 
-{ "name": "Your Name", "email": "rochasvarma123+t1@gmail.com", "password": "secret123", "role": "CUSTOMER" }
+{ "name": "Your Name", "email": "rochasvarma123+t2@gmail.com", "password": "secret123", "role": "CUSTOMER" }
 
 > {% client.global.set("custToken", response.body.token); %}
 
@@ -26,7 +27,7 @@ POST {{base}}/api/events
 Authorization: Bearer {{orgToken}}
 Content-Type: application/json
 
-{ "title": "Tech Meetup 2026", "description": "Talks + pizza", "venue": "Bengaluru Hall A",
+{ "title": "Tech Meetup  2026", "description": "Talks + pizza", "venue": "Bengaluru Hall A",
   "startsAt": "2026-12-20T18:00:00+05:30", "totalTickets": 100 }
 
 > {% client.global.set("eventId", response.body.id); %}

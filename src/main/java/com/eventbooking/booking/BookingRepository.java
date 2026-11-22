@@ -50,6 +50,34 @@ public class BookingRepository {
                 .query(MAPPER).optional();
     }
 
+    /**
+     * OPTIMIZED v2: reserve tickets, insert the booking AND enqueue the confirmation job in a
+     * single statement, run in auto-commit mode. One network round trip, no separate COMMIT,
+     * and the event row lock is released the moment the statement finishes.
+     * The outbox guarantee still holds: a single statement is atomic.
+     */
+    public Optional<Booking> bookWithOutbox(long eventId, long customerId, int qty) {
+        return jdbc.sql("""
+                        WITH reserved AS (
+                            UPDATE events
+                               SET available_tickets = available_tickets - :qty, updated_at = now()
+                             WHERE id = :eventId
+                               AND status = 'ACTIVE'
+                               AND starts_at > now()
+                               AND available_tickets >= :qty
+                            RETURNING id),
+                        booked AS (
+                            INSERT INTO bookings (event_id, customer_id, quantity, status)
+                            SELECT id, :customerId, :qty, 'CONFIRMED' FROM reserved
+                            RETURNING *),
+                        job AS (
+                            INSERT INTO jobs (type, payload)
+                            SELECT 'BOOKING_CONFIRMED', jsonb_build_object('bookingId', id) FROM booked)
+                        SELECT * FROM booked""")
+                .param("eventId", eventId).param("customerId", customerId).param("qty", qty)
+                .query(MAPPER).optional();
+    }
+
     /** BASELINE helpers (used together with SELECT ... FOR UPDATE in the service). */
     public void decrementAvailable(long eventId, int newAvailable) {
         jdbc.sql("UPDATE events SET available_tickets = :a, updated_at = now() WHERE id = :id")

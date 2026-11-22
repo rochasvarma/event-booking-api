@@ -40,6 +40,8 @@ spring:
 management:
   health:
     mail:
+      # SMTP is optional (default provider is the Brevo HTTPS API), so don't let an
+      # unconfigured SMTP server mark the whole app unhealthy.
       enabled: false
   endpoints:
     web:
@@ -63,7 +65,7 @@ app:
   jobs:
     poll-interval-ms: ${JOBS_POLL_INTERVAL_MS:500}
     batch-size: ${JOBS_BATCH_SIZE:50}
-    worker-threads: ${JOBS_WORKER_THREADS:8}
+    worker-threads: ${JOBS_WORKER_THREADS:2}
     enabled: ${JOBS_ENABLED:true}
   email:
     # brevo-api (HTTPS, works on hosts that block SMTP ports) | smtp

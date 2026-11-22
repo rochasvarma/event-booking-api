@@ -9,6 +9,7 @@ import com.eventbooking.security.AuthUser;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.OffsetDateTime;
 import java.util.Map;
@@ -19,47 +20,53 @@ public class BookingService {
     private final BookingRepository bookings;
     private final EventRepository events;
     private final JobQueue jobs;
+    private final TransactionTemplate tx;
     private final boolean baseline;
     private final int maxPerBooking;
 
-    public BookingService(BookingRepository bookings, EventRepository events, JobQueue jobs,
+    public BookingService(BookingRepository bookings, EventRepository events, JobQueue jobs, TransactionTemplate tx,
                           @Value("${app.booking.mode}") String mode,
                           @Value("${app.booking.max-tickets-per-booking}") int maxPerBooking) {
         this.bookings = bookings;
         this.events = events;
         this.jobs = jobs;
+        this.tx = tx;
         this.baseline = "baseline".equalsIgnoreCase(mode);
         this.maxPerBooking = maxPerBooking;
     }
 
-    @Transactional
     public Booking book(AuthUser customer, long eventId, int qty) {
         if (qty < 1 || qty > maxPerBooking) {
             throw ApiException.badRequest("quantity must be between 1 and " + maxPerBooking);
         }
-        Booking booking = baseline ? bookBaseline(customer, eventId, qty) : bookOptimized(customer, eventId, qty);
-
-        // Same transaction as the booking -> the confirmation email can't be lost (transactional outbox).
-        jobs.enqueue(JobQueue.BOOKING_CONFIRMED, Map.of("bookingId", booking.id()));
-        return booking;
+        return baseline ? bookBaseline(customer, eventId, qty) : bookOptimized(customer, eventId, qty);
     }
 
-    /** One SQL statement; the event row lock is held only for that statement. */
+    /**
+     * Optimized: ONE auto-committed SQL statement reserves tickets, inserts the booking and
+     * enqueues the confirmation job. No BEGIN/COMMIT round trips; the row lock lasts only
+     * for the statement itself.
+     */
     private Booking bookOptimized(AuthUser customer, long eventId, int qty) {
-        return bookings.bookAtomically(eventId, customer.id(), qty)
+        return bookings.bookWithOutbox(eventId, customer.id(), qty)
                 .orElseThrow(() -> explainFailure(eventId, qty));
     }
 
     /**
-     * First-cut implementation: lock the event row, check in Java, write back, insert.
-     * Correct (no overselling) but the row lock is held across 3 round trips + commit,
-     * so all bookings for one event queue up behind each other and the DB pool drains fast.
+     * Baseline (first-cut implementation): explicit transaction, lock the event row, check in
+     * Java, write back, insert booking, insert job, commit. Correct (no overselling) but the row
+     * lock is held across 5 round trips, so bookings for one event queue up behind each other
+     * and the DB pool drains fast.
      */
     private Booking bookBaseline(AuthUser customer, long eventId, int qty) {
-        Event e = events.findByIdForUpdate(eventId).orElseThrow(() -> ApiException.notFound("Event not found"));
-        validateBookable(e, qty);
-        bookings.decrementAvailable(eventId, e.availableTickets() - qty);
-        return bookings.insert(eventId, customer.id(), qty);
+        return tx.execute(status -> {
+            Event e = events.findByIdForUpdate(eventId).orElseThrow(() -> ApiException.notFound("Event not found"));
+            validateBookable(e, qty);
+            bookings.decrementAvailable(eventId, e.availableTickets() - qty);
+            Booking b = bookings.insert(eventId, customer.id(), qty);
+            jobs.enqueue(JobQueue.BOOKING_CONFIRMED, Map.of("bookingId", b.id()));
+            return b;
+        });
     }
 
     private ApiException explainFailure(long eventId, int qty) {
