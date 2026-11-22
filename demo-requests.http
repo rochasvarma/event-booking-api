@@ -3,8 +3,8 @@
 ### by the "> {% ... %}" scripts and reused by later requests.
 ### Re-running from the top? Change the two emails in 1 and 2 (or you'll get 409).
 
-#@base = https://event-booking-api-be40.onrender.com
-@base = http://localhost:8080
+@base = https://event-booking-api-be40.onrender.com
+#@base = http://localhost:8080
 
 ### 1. Register an organizer
 POST {{base}}/api/auth/register
