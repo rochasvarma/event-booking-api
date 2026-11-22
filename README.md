@@ -2,8 +2,9 @@
 
 A Spring Boot 3 / Java 21 REST API for an event booking platform with two roles: **Event Organizers** manage events, **Customers** browse and book tickets. Bookings and event updates trigger **background jobs** that send **real emails** and create in-app notifications. The booking path is built and load-tested for high concurrency, with a switchable **baseline vs optimized** implementation so the performance gain can be measured.
 
-- **Live URL:** `https://<your-app>.onrender.com`  ← fill in
-- **Demo video:** `<loom link>`  ← fill in
+- **Live URL:** https://event-booking-api-be40.onrender.com (free tier: the first request after 15 min idle takes ~30–60 s to wake the server)
+- **Demo video:** https://www.loom.com/share/b91dbd246eec4f589cbbfac3a510aef0
+- **Repository:** https://github.com/rochasvarma/event-booking-api
 
 ---
 
@@ -33,8 +34,8 @@ A Spring Boot 3 / Java 21 REST API for an event booking platform with two roles:
             │                                      ▼                           │
             │                       bookings / events  +  jobs (outbox row)    │
             │                                                                  │
-            │ JobWorker (@Scheduled poll, SKIP LOCKED, 8 threads)              │
-            │   BOOKING_CONFIRMED → notification + SEND_EMAIL job              │
+            │ JobWorker (@Scheduled poll, SKIP LOCKED, 2 threads)              │
+            │   BOOKING_CONFIRMED → send email + save notification             │
             │   EVENT_UPDATED     → notifications + 1 SEND_EMAIL job/customer  │
             │   SEND_EMAIL        → Brevo API / SMTP → email_log               │
             └──────────────────────────────────┬───────────────────────────────┘
@@ -120,7 +121,7 @@ and runs the batch on a thread pool. `SKIP LOCKED` lets many workers or instance
 - **Delivery semantics:** at-least-once. A crash between sending and marking done could re-send one email, which is the accepted trade-off for never losing one.
 
 ### Task 1: Booking confirmation
-`BOOKING_CONFIRMED` → loads booking, event and customer → one transaction that inserts an in-app notification and enqueues a `SEND_EMAIL` job → `SendEmailHandler` sends an HTML email through Brevo/SMTP and records the result in `email_log`.
+The booking statement itself inserts the `BOOKING_CONFIRMED` job. The worker picks it up, loads the booking, event and customer, sends the HTML confirmation email through Brevo/SMTP (logged in `email_log`), then saves an in-app notification. The email goes first and the notification only after it succeeds, so a failed send retries cleanly without duplicate notifications. One job per booking keeps background DB work low.
 
 ### Task 2: Event update notification
 `PATCH /api/events/{id}` computes a human-readable diff (e.g. `Venue: Hall A → Hall B`). It enqueues `EVENT_UPDATED` only if a customer-visible field changed. The handler does the fan-out **set-based in SQL**, with no Java loop over customers:
@@ -151,7 +152,9 @@ RETURNING *;
 
 Under Postgres' READ COMMITTED isolation, concurrent `UPDATE`s on the same row serialise. Each one re-evaluates the `WHERE` against the latest committed row, so the check and the decrement are atomic. If no row matched, nothing is inserted and the API returns 409 with the precise reason.
 
-**Verified:** 400 concurrent buyers racing for 100 tickets → exactly **100 booked, 0 available**, no oversell. Reproduce against the deployment with `loadtest/oversell.js`.
+**Verified on the live deployment** (`loadtest/oversell.js`): 100 concurrent buyers made 300 booking attempts for 100 tickets. Result: **sold = 100, available = 0, and exactly 100 requests got `201`**, so every success maps to exactly one ticket. 152 got `409 Sold out`, and 48 were shed with `503` under load without taking a ticket. No overselling.
+
+The same race against a local Postgres (300 parallel connections, 100 tickets) also produced exactly 100 bookings and 100 confirmation jobs.
 
 ---
 
@@ -159,15 +162,15 @@ Under Postgres' READ COMMITTED isolation, concurrent `UPDATE`s on the same row s
 
 ### How to measure
 ```bash
-# breaking point: step concurrency up 10 → 800 users, 20s each
-.\loadtest\run-steps.ps1 -BaseUrl https://<app>.onrender.com        # Windows
+# breaking point: discarded warm-up, then 25 → 50 → 100 → 200 → 400 users, 20 s each
+.\loadtest\run-steps.ps1 -BaseUrl https://<app>.onrender.com -Steps 25,50,100,200,400   # Windows
 ./loadtest/run-steps.sh https://<app>.onrender.com                  # Mac/Linux
 
 # single run, with concurrent event updates on the same event
 k6 run -e BASE_URL=... -e VUS=200 -e UPDATE_RPS=5 loadtest/booking.js
 
 # correctness under a race
-k6 run -e BASE_URL=... -e VUS=300 -e TICKETS=100 loadtest/oversell.js
+k6 run -e BASE_URL=... loadtest/oversell.js          # defaults: 100 buyers, 300 attempts, 100 tickets
 ```
 
 Each run prints a line like:
@@ -191,7 +194,7 @@ This is the typical first-cut code:
 | 5 | **Small, fixed Hikari pool + fast-fail → 503 + `Retry-After`** | Postgres performs best with few connections (≈ 2×cores). Fail-fast sheds load cleanly instead of timing out. |
 | 6 | **Background worker capped at 2 threads** (`JOBS_WORKER_THREADS`) | Worker threads share the 10-connection pool. At 8 threads they took connections bookings needed under load (which showed up as 503s). |
 | 7 | **One background job per booking** (confirmation handler sends the email directly) | Halves background DB work per booking, leaving more CPU and connections for the API. |
-| 8 | **Pool wait 8 s, just under the client timeout** | Short bursts queue instead of being rejected. Real overload still gets a fast 503. |
+| 8 | **Pool wait tuned by measurement** (5 s kept after testing 8 s) | Waiting longer removes a few errors at moderate load but turns overload into slow client timeouts instead of fast 503s (see the experiment below). |
 | 9 | **Indexes / partial indexes** on hot lookups; set-based SQL fan-out for notifications | Constant-time paths. One statement notifies N customers. |
 
 ### Results (Render free tier: 0.1 CPU / 512 MB web service + free Postgres, k6 from Bengaluru, 20 s per step)
@@ -208,7 +211,7 @@ Successful bookings per second (201s ÷ 20 s load phase), p95 latency, and error
 
 - **v1** = single conditional UPDATE + stateless JWT + virtual threads + fast-fail 503.
 - **v2** = v1 + reservation, booking and outbox job folded into **one auto-committed statement** + background worker capped at 2 threads.
-- **v3** (latest code) = v2 + one background job per booking instead of two (the confirmation handler sends the email itself) + pool wait kept at 5 s (an 8 s experiment is described below). Before each test, a warm-up run is discarded so the JVM has JIT-compiled the hot path.
+- **v3** (latest code) = v2 + one background job per booking instead of two (the confirmation handler sends the email itself) + pool wait kept at 5 s (an 8 s experiment is described below). Before the v3 test, a warm-up run is discarded so the JVM has JIT-compiled the hot path. Earlier runs had no warm-up, which slightly penalises their 25-user row.
 
 > An earlier version of the k6 script divided by the whole run time, including ~40 s of user-registration setup, which under-reported throughput about 3×. The table above uses the corrected load-phase figure. Error rates and latencies were unaffected.
 
@@ -221,6 +224,8 @@ Successful bookings per second (201s ÷ 20 s load phase), p95 latency, and error
 - **2× the error-free concurrency** (50 → 100 users)
 - **p95 cut by 50–70%** (25 users: 5.6 s → 1.8 s; 100 users: 7.8 s → 4.0 s)
 - **errors at 200 users down from 41% to 16%**, and at 400 users from 83% to 56%, with 2.6× the throughput there
+
+**Bookings + event updates together (baseline, live run in the demo video):** 200 users booking while the organizer updates the same event 5 times/s (`-e VUS=200 -e UPDATE_RPS=5`). Result: **~91–94% of bookings dropped across runs (e.g. 23 of 409 succeeded) and 0 of 10 event updates succeeded**, all timing out. The `PATCH` needs the same event-row lock that every baseline booking holds across 6 round trips, so organizer updates starve behind the booking queue. In the optimized version the lock lasts a single statement, so updates and bookings interleave. The same command is run against the optimized version in the video for comparison.
 
 **Experiment that didn't make the cut:** raising the DB pool wait to 8 s gave 0% errors at 100 users. At 200 users, though, queued requests then hit the client's 10 s timeout instead of getting a fast 503 (38% errors vs 16%). We kept 5 s: graceful degradation under overload matters more than squeezing the last 0.1% at moderate load. It's configurable via `DB_CONNECTION_TIMEOUT_MS`.
 

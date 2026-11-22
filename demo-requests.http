@@ -10,7 +10,7 @@
 POST {{base}}/api/auth/register
 Content-Type: application/json
 
-{ "name": "Olivia Organizer", "email": "olivia4@example.com", "password": "secret123", "role": "ORGANIZER" }
+{ "name": "Olivia Organizer", "email": "olivia5@example.com", "password": "secret123", "role": "ORGANIZER" }
 
 > {% client.global.set("orgToken", response.body.token); %}
 
@@ -18,7 +18,7 @@ Content-Type: application/json
 POST {{base}}/api/auth/register
 Content-Type: application/json
 
-{ "name": "Your Name", "email": "rochasvarma123+t3@gmail.com", "password": "secret123", "role": "CUSTOMER" }
+{ "name": "Your Name", "email": "rochasvarma123+t4@gmail.com", "password": "secret123", "role": "CUSTOMER" }
 
 > {% client.global.set("custToken", response.body.token); %}
 
